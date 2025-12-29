@@ -66,131 +66,181 @@
   <h2 id="nearestStationName" class="text-lg font-bold">Detecting...</h2>
   <p id="nearestStationLine" class="text-sm text-neutral-400">—</p>
 </footer>
-
 <script>
 // ---------- MAP INIT ---------- //
-let map=L.map("map").setView([23.06,72.6],12);
+let map = L.map("map").setView([23.06,72.6],12);
 L.tileLayer("https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png",{maxZoom:19}).addTo(map);
-const OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter";
-// const OVERPASS_URL = "https://overpass-api.de/api/interpreter"; // old
 
 // ---------- GLOBAL ---------- //
-let stations=[];
-let userMarker=null;
+let stations = [];
+let userMarker = null;
+let trackLayers = [];
+let routeLine = null;
 
-// ---------- USER ICON ---------- //
-const userIcon=L.icon({
-  iconUrl:"https://cdn-icons-png.flaticon.com/512/2776/2776067.png",
-  iconSize:[36,36],iconAnchor:[18,36],popupAnchor:[0,-36]
+// ---------- USER ICON (RED) ---------- //
+const userIcon = L.icon({
+  iconUrl:"https://cdn-icons-png.flaticon.com/512/684/684908.png",
+  iconSize:[28,28],iconAnchor:[14,28]
 });
 
-// ---------- ROUTING ---------- //
-let router=null;
-function drawRoute(from,to){
-  if(router) map.removeControl(router);
-  router=L.Routing.control({
-    waypoints:[L.latLng(from.lat,from.lng),L.latLng(to.lat,to.lng)],
-    lineOptions:{styles:[{color:"#00ffcc",weight:4}]},
-    addWaypoints:false,draggableWaypoints:false,createMarker:()=>null
-  }).addTo(map);
-}
-
-// ---------- FIND NEAREST ---------- //
-function findNearest(coords){
-  if(stations.length===0) return;
-
-  let nearest=null,dist=999;
-  stations.forEach(s=>{
-    const d=Math.hypot(coords.lat-s.lat,coords.lng-s.lng);
-    if(d<dist){dist=d;nearest=s;}
-  });
-
-  document.getElementById("nearestStationName").innerText = nearest.name;
-  document.getElementById("nearestStationLine").innerText = "Auto-updated from OSM";
-  drawRoute(coords,nearest);
-}
-
-// ---------- GET USER GPS ---------- //
-function getGPS(){
-  navigator.geolocation.getCurrentPosition(pos=>{
-    const coords={lat:pos.coords.latitude,lng:pos.coords.longitude};
-
-    // fill your location input
-    srcInput.value=`${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`;
-
-    // show user marker
-    if(userMarker) map.removeLayer(userMarker);
-    userMarker=L.marker([coords.lat,coords.lng],{icon:userIcon})
-      .addTo(map).bindPopup("<b>You are here</b>").openPopup();
-
-    map.setView([coords.lat,coords.lng],14);
-
-    // if stations already loaded → find nearest
-    findNearest(coords);
-
-  },()=>alert("Enable location permissions & run with localhost/https!"));
-}
-
-// ---------- LOAD METRO STATIONS DYNAMICALLY ---------- //
+// ---------- LOAD METRO STATIONS (dynamic subway stations only) ---------- //
 async function loadStations(){
   const query = `
   [out:json];
-  (
-    node["station"="subway"](22.90,72.40,23.40,72.80);
-    node["railway"="station"]["subway"="yes"](22.90,72.40,23.40,72.80);
-    node["railway"="halt"]["subway"="yes"](22.90,72.40,23.40,72.80);
-  );
+  node["station"="subway"](22.90,72.40,23.40,72.80);
   out center;`;
 
-  try{
-    const res=await fetch(OVERPASS_URL,{method:"POST",body:query});
-    const data=await res.json();
+  const res = await fetch("https://overpass-api.de/api/interpreter",{method:"POST",body:query});
+  const data = await res.json();
 
-    stations=data.elements.map(e=>({name:e.tags.name,lat:e.lat,lng:e.lon}));
-    console.log(`Dynamic stations loaded:`,stations);
+  stations = data.elements.map(e=>({name:e.tags.name, lat:e.lat, lng:e.lon}));
 
-    // place markers
-    stations.forEach(s=>{
-      L.marker([s.lat,s.lng]).addTo(map)
-       .bindPopup(`<b>${s.name}</b><br>Metro Station`);
-    });
+  stations.forEach(s=>{
+    const m=L.marker([s.lat,s.lng]).addTo(map).bindPopup(`<b>${s.name}</b>`);
+    // clicking station routes along tracks
+    m.on("click",()=>routeFromUserToStation(s));
+  });
+}
 
-    // if user location known → update nearest
-    if(userMarker){
-      const c=userMarker.getLatLng();
-      findNearest({lat:c.lat,lng:c.lng});
-    }
-  }
-  catch(err){
-    console.error("Overpass error:",err);
+
+// ---------- DRAW METRO TRACKS (taken from your working code) ---------- //
+async function drawMetroTrack(){
+  const q=`
+    [out:json];
+    way["railway"~"subway|light_rail|tram"](22.90,72.40,23.40,72.90);
+    (._;>;);
+    out;`;
+
+  const res=await fetch("https://overpass-api.de/api/interpreter",{method:"POST",body:q});
+  const data=await res.json();
+
+  const nodes={};
+  data.elements.filter(e=>e.type==="node").forEach(n=>nodes[n.id]=[n.lat,n.lon]);
+
+  const tracksRaw=data.elements.filter(e=>e.type==="way" && e.tags && e.tags.railway)
+    .map(w=>w.nodes.map(n=>nodes[n]).filter(Boolean));
+
+  // remove previous lines
+  trackLayers.forEach(l=>map.removeLayer(l));
+  trackLayers=[];
+
+  // draw every available segment
+  tracksRaw.forEach(path=>{
+    const line=L.polyline(path,{color:"#0099ff",opacity:.6,weight:4}).addTo(map);
+    trackLayers.push(line);
+  });
+}
+
+
+// ---------- FIND NEAREST STATION ---------- //
+function nearest(lat,lng){
+  let best=null,dist=99999;
+  stations.forEach(s=>{
+    const d=Math.hypot(lat-s.lat,lng-s.lng);
+    if(d<dist){dist=d;best=s;}
+  });
+  return best;
+}
+
+function findNearest(coords){
+  const s=nearest(coords.lat,coords.lng);
+  nearestStationName.innerText = s.name;
+  nearestStationLine.innerText = "Connected Metro Station";
+  drawUserRoute(coords,s);
+}
+
+
+// ---------- GPS ---------- //
+function getGPS(){
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const coords={lat:pos.coords.latitude,lng:pos.coords.longitude};
+    srcInput.value=`${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`;
+    
+    if(userMarker) map.removeLayer(userMarker);
+    userMarker=L.marker([coords.lat,coords.lng],{icon:userIcon})
+      .addTo(map).bindPopup("You are here").openPopup();
+      
+    map.setView([coords.lat,coords.lng],14);
+    findNearest(coords);
+  },()=>alert("Enable GPS & run HTTPS"));
+}
+
+
+// ---------- ROUTE ALONG TRACKS NOT STRAIGHT ---------- //
+function drawUserRoute(from,to){
+  if(routeLine) map.removeLayer(routeLine);
+
+  let best=null,min=99999;
+
+  trackLayers.forEach(layer=>{
+    const pts=layer.getLatLngs();
+    const d=Math.hypot(from.lat-pts[0].lat,from.lng-pts[0].lng)+
+            Math.hypot(to.lat-pts[pts.length-1].lat,to.lng-pts[pts.length-1].lng);
+    if(d<min){min=d;best=pts;}
+  });
+
+  if(best){
+    routeLine=L.polyline(best,{color:"#ffdd00",weight:5}).addTo(map);
+    map.fitBounds(routeLine.getBounds());
   }
 }
 
+
+// ---------- CLICK STATION ROUTING ---------- //
+function routeFromUserToStation(dest){
+  if(!userMarker) return alert("User not detected yet");
+  const u=userMarker.getLatLng();
+  drawUserRoute({lat:u.lat,lng:u.lng},dest);
+}
+
+
+// ---------- SEARCH ENTER ---------- //
+dstInput.addEventListener("keypress",e=>{
+  if(e.key==="Enter"){
+    let val=dstInput.value.toLowerCase();
+    let match=stations.find(s=>s.name.toLowerCase().includes(val));
+    if(match && userMarker){
+      let u=userMarker.getLatLng();
+      drawUserRoute({lat:u.lat,lng:u.lng},match);
+    }
+  }
+});
+
+
 // ---------- CHIPS ---------- //
 const chipLoc={
- "Thaltej":{lat:23.058850,lng:72.508086},
+ "Thaltej":{lat:23.059395,lng:72.508349},
  "Apparel Park":{lat:23.019300,lng:72.634600},
  "Motera":{lat:23.092204,lng:72.596535},
- "Infocity":{lat:23.1887,lng:72.6288}
+ "Infocity":{lat:23.188700,lng:72.628800}
 };
+
 document.querySelectorAll(".chip").forEach(chip=>{
  chip.onclick=()=>{
    const p=chipLoc[chip.innerText.trim()];
-   document.getElementById("dstInput").value=chip.innerText.trim();
-   if(userMarker) findNearest(p);
+   if(userMarker && p){
+     let u=userMarker.getLatLng();
+     const destStation=nearest(p.lat,p.lng);
+     drawUserRoute({lat:u.lat,lng:u.lng},destStation);
+   }
  };
 });
+
 
 // ---------- BUTTONS ---------- //
 gpsBtn.onclick=getGPS;
 refreshBtn.onclick=getGPS;
 swapBtn.onclick=()=>[srcInput.value,dstInput.value]=[dstInput.value,srcInput.value];
 
-// ---------- INIT (FAST GPS FIRST, STATIONS IN BACKGROUND) ---------- //
+
+// ---------- INIT ---------- //
 window.onload=()=>{
-  getGPS();        // 🚀 instant current location
-  loadStations();  // 🌍 fetch live metro dynamically
+  getGPS();
+  loadStations();
+  drawMetroTrack();
 };
 </script>
+
+
 </body>
 </html>
