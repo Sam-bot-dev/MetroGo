@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Gandhinagar Metro Navigation</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@200&display=swap" rel="stylesheet">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.min.js"></script>
+
+<style>
+  body,html{margin:0;padding:0;}
+  #map{height:60vh;width:100%;}
+  .chip{white-space:nowrap;padding:6px 16px;border-radius:9999px;font-size:12px;background:#e5e7eb;color:#334155;cursor:pointer;}
+  .chip:hover{background:#0d7ff2;color:white;}
+  .leaflet-routing-container{background:#18181b;border-radius:12px;color:white;}
+</style>
+</head>
+
+<body class="bg-black text-white flex flex-col min-h-screen">
+
+<header class="p-4 bg-neutral-900 border-b border-neutral-700">
+  <h1 class="text-xl font-bold flex items-center gap-2">
+    <span class="material-symbols-outlined text-blue-500">tram</span>
+    Gandhinagar Metro
+  </h1>
+
+  <div class="mt-3 relative">
+    <input id="srcInput" placeholder="Your location"
+           class="w-full p-2 rounded bg-neutral-800 border border-neutral-600 mb-2"/>
+    <input id="dstInput" placeholder="Where to?"
+           class="w-full p-2 rounded bg-neutral-800 border border-neutral-600"/>
+
+    <button id="swapBtn"
+      class="absolute right-2 top-8 bg-blue-500 text-white px-3 py-1 rounded-full">
+      swap
+    </button>
+  </div>
+
+  <div class="flex gap-2 overflow-x-auto mt-2">
+    <button class="chip">Sector 16</button>
+    <button class="chip">Infocity</button>
+    <button class="chip">GIFT City</button>
+    <button class="chip">Akshardham</button>
+  </div>
+</header>
+
+<main class="flex-1 relative">
+  <div id="map"></div>
+
+  <button id="gpsBtn"
+    class="absolute bottom-24 right-4 p-3 bg-blue-600 text-white rounded-full shadow-xl">
+    <span class="material-symbols-outlined">my_location</span>
+  </button>
+
+  <button id="refreshBtn"
+    class="absolute bottom-24 left-4 p-3 bg-gray-700 text-white rounded-full shadow-xl">
+    <span class="material-symbols-outlined">refresh</span>
+  </button>
+</main>
+
+<footer class="bg-neutral-900 p-4 border-t border-neutral-700">
+  <p class="text-xs text-blue-400 font-semibold uppercase">Nearest Metro</p>
+  <h2 id="nearestStationName" class="text-lg font-bold">Detecting...</h2>
+  <p id="nearestStationLine" class="text-sm text-neutral-400">—</p>
+  <p id="nextMetroTime" class="text-sm text-green-400 mt-1">—</p>
+</footer>
+
+<script>
+// ====== TILE THEME ====== //
+const darkTile="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png";
+const lightTile="https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png";
+const tileURL=window.matchMedia("(prefers-color-scheme: dark)").matches?darkTile:lightTile;
+
+// ====== MAP INIT ====== //
+let map=L.map("map").setView([23.223,72.65],12);
+L.tileLayer(tileURL,{maxZoom:19}).addTo(map);
+
+// ====== DYNAMIC STATIONS ARRAY ====== //
+let stations=[];
+
+// ====== METRO TIMINGS (DEFAULT) ====== //
+const metroTiming = {
+  first: "06:10",
+  last: "22:30",
+  frequency: 10
+};
+
+function getNextMetroTime() {
+  const now = new Date();
+  const [fh, fm] = metroTiming.first.split(":").map(Number);
+  const [lh, lm] = metroTiming.last.split(":").map(Number);
+
+  const first = new Date(); first.setHours(fh, fm, 0, 0);
+  const last  = new Date(); last.setHours(lh, lm, 0, 0);
+
+  if (now < first) return `Next metro at ${metroTiming.first}`;
+  if (now > last)  return `No service (after ${metroTiming.last})`;
+
+  let minutesSinceFirst = Math.floor((now - first) / (1000 * 60));
+  let minutesToNext = metroTiming.frequency - (minutesSinceFirst % metroTiming.frequency);
+  
+  return `Next metro in ${minutesToNext} min`;
+}
+
+// ====== FETCH STATIONS ====== //
+async function loadStations(){
+  const query = `
+    [out:json];
+    (
+      node["railway"="station"](23.10,72.50,23.37,72.80);
+      node["railway"="halt"](23.10,72.50,23.37,72.80);
+    );
+    out;
+  `;
+  const res = await fetch("https://overpass-api.de/api/interpreter",{ method:"POST", body:query });
+  const data = await res.json();
+
+  stations = data.elements
+    .filter(e=>e.tags && e.tags.name)
+    .map(e=>({ name:e.tags.name, lat:e.lat, lng:e.lon }));
+
+  stations.forEach(s=>{
+    L.marker([s.lat,s.lng]).addTo(map)
+      .bindPopup(`<b>${s.name}</b><br>First: ${metroTiming.first}<br>Last: ${metroTiming.last}`);
+  });
+}
+
+// ====== CUSTOM USER ICON ====== //
+const userIcon = L.icon({
+  iconUrl: "https://cdn-icons-png.flaticon.com/512/2776/2776067.png",
+  iconSize: [36, 36],
+  iconAnchor: [18, 36],
+  popupAnchor: [0, -36]
+});
+
+// ====== ROUTING ====== //
+let router=null;
+function drawRoute(from,to){
+  if(router) map.removeControl(router);
+  router=L.Routing.control({
+    waypoints:[L.latLng(from.lat,from.lng),L.latLng(to.lat,to.lng)],
+    lineOptions:{styles:[{color:"#00ffcc",weight:4}]},
+    addWaypoints:false,
+    draggableWaypoints:false,
+    createMarker:()=>null,
+    show:false
+  }).addTo(map);
+}
+
+// ====== NEAREST ====== //
+function findNearest(coords){
+  let best=null,dist=Infinity;
+  stations.forEach(s=>{
+    const d=Math.hypot(coords.lat-s.lat,coords.lng-s.lng);
+    if(d<dist){dist=d;best=s;}
+  });
+
+  document.getElementById("nearestStationName").innerText = best.name;
+  document.getElementById("nearestStationLine").innerText =
+    `First: ${metroTiming.first} | Last: ${metroTiming.last}`;
+  document.getElementById("nextMetroTime").innerText = getNextMetroTime();
+
+  drawRoute(coords,best);
+  map.setView([best.lat,best.lng],14);
+}
+
+// ====== USER LOCATION ====== //
+let userMarker=null;
+function setUser(coords){
+  if(userMarker) map.removeLayer(userMarker);
+  userMarker=L.marker([coords.lat,coords.lng],{icon:userIcon})
+    .addTo(map)
+    .bindPopup("<b>You are here</b>")
+    .openPopup();
+}
+
+async function getGPS(){
+  return new Promise(resolve=>{
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const coords={lat:pos.coords.latitude,lng:pos.coords.longitude};
+      document.getElementById("srcInput").value =
+        `${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`;
+      setUser(coords);
+      findNearest(coords);
+      resolve();
+    },()=>alert("Enable location permissions."));
+  });
+}
+
+// ====== CHIPS ====== //
+const places={
+ "Sector 16":{lat:23.2359,lng:72.6431},
+ "Infocity":{lat:23.1887,lng:72.6288},
+ "GIFT City":{lat:23.1412,lng:72.6842},
+ "Akshardham":{lat:23.2414,lng:72.6843}
+};
+
+document.querySelectorAll(".chip").forEach(chip=>{
+  chip.onclick=()=>{
+    const p=places[chip.innerText.trim()];
+    document.getElementById("dstInput").value=chip.innerText.trim();
+    setUser(p);
+    findNearest(p);
+  };
+});
+
+// ====== BUTTONS ====== //
+document.getElementById("gpsBtn").onclick=getGPS;
+document.getElementById("refreshBtn").onclick=getGPS;
+document.getElementById("swapBtn").onclick=()=>{
+  const src=document.getElementById("srcInput");
+  const dst=document.getElementById("dstInput");
+  [src.value,dst.value]=[dst.value,src.value];
+};
+
+// ====== INIT (KEY FIX) ====== //
+window.onload = async () => {
+  await loadStations();
+  await new Promise(r => setTimeout(r, 400)); // wait for map & stations ready
+  await getGPS(); // NOW GPS will always fill your location
+};
+</script>
+
+</body>
+</html>
