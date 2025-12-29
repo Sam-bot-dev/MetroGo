@@ -71,6 +71,8 @@
 // ---------- MAP INIT ---------- //
 let map=L.map("map").setView([23.06,72.6],12);
 L.tileLayer("https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png",{maxZoom:19}).addTo(map);
+const OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter";
+// const OVERPASS_URL = "https://overpass-api.de/api/interpreter"; // old
 
 // ---------- GLOBAL ---------- //
 let stations=[];
@@ -141,7 +143,7 @@ async function loadStations(){
   out center;`;
 
   try{
-    const res=await fetch("https://overpass-api.de/api/interpreter",{method:"POST",body:query});
+    const res=await fetch(OVERPASS_URL,{method:"POST",body:query});
     const data=await res.json();
 
     stations=data.elements.map(e=>({name:e.tags.name,lat:e.lat,lng:e.lon}));
